@@ -1,4 +1,6 @@
 FROM ubuntu:20.04
+ARG DEBIAN_FRONTEND=noninteractive
+ENV TZ=Etc/UTC
 
 # The number of CPU cores to use when performing compilation
 ARG CPU_CORES=8
@@ -6,8 +8,11 @@ ARG CPU_CORES=8
 # The version of libGMP that we will build
 ARG GMP_VERSION=6.2.1
 
+# The version of MPFR that we will build
+ARG MPFR_VERSION=4.2.1
+
 # The version of GDB that we will build
-ARG GDB_VERSION=11.2
+ARG GDB_VERSION=13.1
 
 # Install our build dependencies
 RUN rm -f /etc/apt/apt.conf.d/docker-clean; echo 'Binary::apt::APT::Keep-Downloaded-Packages "true";' > /etc/apt/apt.conf.d/keep-cache
@@ -20,7 +25,10 @@ RUN --mount=type=cache,target=/var/cache/apt --mount=type=cache,target=/var/lib/
 		curl \
 		mingw-w64 \
 		tar \
-		zip
+		zip \
+		libmpc-dev \
+		libgmp-dev \
+		texinfo
 
 # Create a non-root user and perform all build steps as this user (this simplifies things a little when later copying files out of the container image)
 RUN useradd --create-home --home /home/nonroot --shell /bin/bash --uid 1000 nonroot
@@ -30,6 +38,10 @@ USER nonroot
 RUN mkdir /tmp/src
 RUN curl -fSL "https://gmplib.org/download/gmp/gmp-${GMP_VERSION}.tar.xz" -o "/tmp/gmp-${GMP_VERSION}.tar.xz" && \
 	tar xvf "/tmp/gmp-${GMP_VERSION}.tar.xz" --directory /tmp/src
+
+# Download and extract the source code for MPFR
+RUN curl -fSL "https://www.mpfr.org/mpfr-${MPFR_VERSION}/mpfr-${MPFR_VERSION}.tar.xz" -o "/tmp/mpfr-${MPFR_VERSION}.tar.gz" && \
+	tar xvf "/tmp/mpfr-${MPFR_VERSION}.tar.gz" --directory /tmp/src
 
 # Download and extract the source code for GDB
 RUN curl -fSL "https://ftp.gnu.org/gnu/gdb/gdb-${GDB_VERSION}.tar.gz" -o "/tmp/gdb-${GDB_VERSION}.tar.gz" && \
@@ -45,6 +57,16 @@ RUN mkdir -p /tmp/build/gmp && cd /tmp/build/gmp && \
 	make "-j${CPU_CORES}" && \
 	make install
 
+# Cross-compile MPFR for Windows with MinGW-w64
+RUN mkdir -p /tmp/build/mpfr && cd /tmp/build/mpfr && \
+"/tmp/src/mpfr-${MPFR_VERSION}/configure" \
+	--prefix=/tmp/install/mpfr \
+	--host=x86_64-w64-mingw32 \
+	--enable-static \
+	--disable-shared && \
+make "-j${CPU_CORES}" && \
+make install
+
 # Cross-compile GDB for Windows with MinGW-w64, enabling multi-architecture support for debugging both Windows and Linux target applications
 # (See:
 # - https://stackoverflow.com/a/61363144
@@ -52,19 +74,26 @@ RUN mkdir -p /tmp/build/gmp && cd /tmp/build/gmp && \
 # - https://github.com/msys2/MINGW-packages/blob/master/mingw-w64-gdb/PKGBUILD)
 RUN mkdir -p /tmp/build/gdb && cd /tmp/build/gdb && \
 	"/tmp/src/gdb-${GDB_VERSION}/configure" \
+		V=1 \
 		--prefix=/tmp/install/gdb \
 		--host=x86_64-w64-mingw32 \
 		--target=x86_64-w64-mingw32 \
 		--enable-targets=all \
 		--with-libgmp-prefix=/tmp/install/gmp \
+		--with-gmp=/tmp/install/gmp \
+		--with-mpfr=/tmp/install/mpfr \
 		--with-static-standard-libraries \
 		--enable-static \
 		--disable-shared \
 		--disable-ld \
 		--disable-gold \
-		--disable-sim && \
-	make "-j${CPU_CORES}" && \
-	make install
+		--disable-sim
+
+RUN cd /tmp/build/gdb && \
+	make V=1 -d "-j${CPU_CORES}"
+
+RUN cd /tmp/build/gdb && \
+	make install -d
 
 # Copy the GDB executable from the built files and strip away debug symbols to reduce the filesize
 RUN mkdir /tmp/dist && \
